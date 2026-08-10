@@ -21,56 +21,56 @@
 ]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
-%% Starts the state controller for one sector.
+%% Starts a sector controller; used by sector_supervisor.
 start_link(#{sector_id := SectorId} = Config) ->
     Options = #{sector_id => SectorId, snapshot => maps:get(snapshot, Config, #{})},
     gen_server:start_link({local, name(SectorId)}, ?MODULE, Options, []).
 
-%% Returns this controller's node-local registered name.
+%% Returns the local name; used by config and sector modules.
 name(SectorId) -> list_to_atom(atom_to_list(?MODULE) ++ "_" ++ atom_to_list(SectorId)).
 
-%% Returns this sector's launcher PID from its supervisor.
+%% Returns the launcher PID; used by iron_dome_computer.
 launcher(Pid) -> gen_server:call(Pid, launcher).
 
-%% Starts one temporary process owned by this sector.
+%% Starts an entity; used by city and launcher modules.
 start_child(Pid, ChildId, Module, Args, Restart) ->
     gen_server:call(Pid, {start_child, ChildId, Module, Args, Restart}, 5000).
 
-%% Restores the active entities found in a failover snapshot.
+%% Restores snapshot entities; used by node_manager.
 restore(Pid, Snapshot) -> gen_server:call(Pid, {restore, Snapshot}, 10000).
 
-%% Registers a running entity with a stable ID.
+%% Registers an entity; used by city and launcher modules.
 register_entity(Pid, EntityId, Type, EntityPid) ->
     gen_server:call(Pid, {register_entity, EntityId, Type, EntityPid}).
 
-%% Stores the latest runtime state of an entity.
+%% Stores entity state; used by both missile modules.
 update_entity(SectorId, EntityId, RuntimeState) ->
     ets:update_element(entity_table(SectorId), EntityId, {4, RuntimeState}),
     ok.
 
-%% Removes an entity from the sector state.
+%% Removes an entity; used by both missile modules.
 remove_entity(SectorId, EntityId) ->
     ets:delete(entity_table(SectorId), EntityId),
     ok.
 
-%% Returns a serializable sector snapshot.
+%% Returns a snapshot; used by snapshot_manager.
 snapshot(Pid) -> gen_server:call(Pid, snapshot).
 
-%% Registers a transferred hostile missile in its destination sector.
+%% Accepts a hostile transfer; used by hostile_missile.
 accept_missile(Pid, MissileId, MissileState) ->
     gen_server:call(Pid, {accept_entity, hostile_missile, MissileId, MissileState}, 4000).
 
-%% Registers a transferred interceptor in its destination sector.
+%% Accepts an interceptor transfer; used by iron_dome_missile.
 accept_interceptor(Pid, InterceptorId, InterceptorState) ->
     gen_server:call(Pid, {accept_entity, iron_dome_missile, InterceptorId, InterceptorState}, 4000).
 
-%% Returns the current process for a stable entity ID.
+%% Resolves an entity PID; used by computer and interceptor modules.
 entity_pid(Pid, EntityId) -> gen_server:call(Pid, {entity_pid, EntityId}).
 
-%% Returns positions of hostile missiles currently inside this sector.
+%% Returns hostile positions; used by iron_dome_radar.
 hostile_positions(SectorId) -> hostile_entity_positions(entity_table(SectorId)).
 
-%% Removes a finished entity immediately, then records its result asynchronously.
+%% Completes an entity; used by both missile modules.
 complete_entity(SectorId, EntityId, Result) ->
     ets:delete(entity_table(SectorId), EntityId),
     gen_server:cast(name(SectorId), {entity_result, Result}).
@@ -84,12 +84,13 @@ report_launch(Pid) -> gen_server:cast(Pid, report_launch).
 %% never counted as a hit).
 report_no_threat(Pid) -> gen_server:cast(Pid, report_no_threat).
 
-%% Clears statistics and entities that still belong to the previous settings.
+%% Resets a sector run; used by graphics.
 reset_statistics(Pid) -> gen_server:call(Pid, reset_statistics).
 
-%% Builds the sector data state.
+%% Loads the sector state and starts regular graphics updates.
 init(#{sector_id := SectorId, snapshot := Snapshot}) ->
     Table = ensure_entity_table(SectorId),
+    %% A saved sector may contain missiles and old statistics.
     RestoredEntities = maps:get(entities, Snapshot, #{}),
     Statistics = maps:get(statistics, Snapshot, empty_statistics()),
     SnapshotMs = application:get_env(iron_dome, snapshot_interval_ms, 100),
@@ -100,7 +101,7 @@ init(#{sector_id := SectorId, snapshot := Snapshot}) ->
         monitors => monitor_table_entities(Table)},
     {ok, State}.
 
-%% Handles synchronous sector_controller requests.
+%% Sends each sector request to the matching helper.
 handle_call(launcher, _From, #{sector_id := SectorId} = State) ->
     {reply, sector_supervisor:launcher(SectorId), State};
 handle_call({start_child, Id, Module, Args, temporary}, _From, #{sector_id := SectorId} = State) ->
@@ -121,7 +122,7 @@ handle_call({accept_entity, Type, Id, EntityState}, _From, State)
     {reply, Reply, NewState};
 handle_call(Request, _From, State) -> {reply, {error, {unsupported_call, Request}}, State}.
 
-%% Handles asynchronous statistics updates.
+%% Updates statistics without making the sender wait.
 handle_cast({entity_result, Result}, State) -> {noreply, add_result(Result, State)};
 handle_cast(report_launch, State) -> {noreply, increment_stat(hostile_missiles_fired, State)};
 handle_cast(report_no_threat, State) -> {noreply, increment_stat(no_threat_count, State)};
@@ -134,6 +135,7 @@ handle_info(_Message, State) -> {noreply, State}.
 
 %% Registers a newly started entity while preserving restored state.
 register_entity_handler(Id, Type, Pid, #{table := Table} = State) when is_pid(Pid) ->
+    %% A restored entry has state but no live PID, so reuse its state.
     case ets:lookup(Table, Id) of
         [{Id, _OldType, OldPid, _EntityState}] when is_pid(OldPid) ->
             {{error, {already_registered, Id}}, State};
@@ -163,9 +165,11 @@ hostile_entity_positions(Table) ->
 
 %% Starts and registers a transferred or restored entity.
 start_entity(Id, Module, EntityState, #{sector_id := SectorId, table := Table} = State) ->
+    %% Return the old process when this entity is already running.
     case entity_pid_from(Id, Table) of
         {ok, Pid} -> {{ok, Pid}, State};
         {error, not_found} ->
+            %% Build the module-specific data and start a temporary child.
             Options = entity_options(Id, Module, EntityState, SectorId),
             case sector_supervisor:start_child(SectorId, Id, Module, [Options], temporary) of
                 {ok, Pid} -> {{ok, Pid}, register_entity_state(Id, Module, Pid, EntityState, State)};
@@ -193,8 +197,9 @@ add_result(Result, #{statistics := Statistics} = State) ->
 increment_stat(Key, #{statistics := Statistics} = State) ->
     State#{statistics => maps:update_with(Key, fun(N) -> N + 1 end, 1, Statistics)}.
 
-%% Starts a clean statistics run without restarting cities or permanent sector processes.
+%% Clears missiles and counters but keeps the city and sector services running.
 reset_statistics_handler(#{table := Table, monitors := Monitors} = State) ->
+    %% Stop every live missile before clearing its saved entry.
     Pids = [Pid || {_Id, _Type, Pid, _EntityState} <- ets:tab2list(Table), is_pid(Pid)],
     lists:foreach(fun(Pid) -> exit(Pid, shutdown) end, Pids),
     maps:foreach(fun(Ref, _Id) -> erlang:demonitor(Ref, [flush]) end, Monitors),
@@ -205,13 +210,13 @@ reset_statistics_handler(#{table := Table, monitors := Monitors} = State) ->
 empty_statistics() -> #{hostile_missiles_fired => 0, interceptions => 0, city_hits => 0,
     hostile_impacts => 0, interceptor_misses => 0, no_threat_count => 0}.
 
-%% Sends an independent live snapshot for graphics, not recovery history.
+%% Sends the current sector to graphics and starts the next timer.
 broadcast_snapshot_handler(#{sector_id := SectorId, snapshot_ms := SnapshotMs} = State) ->
     snapshot_manager:store_live_snapshot(SectorId, build_snapshot(State)),
     erlang:send_after(SnapshotMs, self(), broadcast_snapshot),
     State.
 
-%% Spreads sector snapshot work evenly across the configured interval.
+%% Gives each sector a different first update time to spread the work.
 snapshot_delay(SectorId, SnapshotMs) ->
     SectorIds = [maps:get(sector_id, Config) || Config <- config:sectors()],
     Index = sector_index(SectorId, SectorIds, 0),
@@ -229,7 +234,7 @@ entity_down_handler(Ref, Pid, #{monitors := Monitors} = State) ->
         error -> State
     end.
 
-%% Recreates every active entity from a failover snapshot.
+%% Starts every missile found in a saved sector state.
 restore_entities_handler(Snapshot, State) ->
     maps:fold(fun(Id, Entity, Acc) -> restore_entity(Id, Entity, Acc) end,
         State, maps:get(entities, Snapshot, #{})).
@@ -243,7 +248,7 @@ restore_entity(EntityId, #{type := Module, state := EntityState}, State)
     end;
 restore_entity(_EntityId, _Entity, State) -> State.
 
-%% Checks whether a snapshot contains the fields needed to restart its entity.
+%% Checks that saved state has the data needed to restart a missile.
 valid_entity_state(hostile_missile, _EntityState) -> true;
 valid_entity_state(iron_dome_missile, EntityState) ->
     lists:all(fun(Key) -> maps:is_key(Key, EntityState) end,
@@ -261,7 +266,7 @@ remove_entity_state(EntityId, Pid, #{table := Table} = State) ->
         _ -> State
     end.
 
-%% Builds a serializable snapshot without node-local PIDs.
+%% Builds saved state without PIDs, because PIDs cannot survive node failure.
 build_snapshot(#{sector_id := SectorId, table := Table, statistics := Statistics}) ->
     Serializable = maps:from_list([{Id, #{type => Type, state => EntityState}}
         || {Id, Type, _Pid, EntityState} <- ets:tab2list(Table)]),
@@ -270,6 +275,7 @@ build_snapshot(#{sector_id := SectorId, table := Table, statistics := Statistics
 %% Creates or reuses this sector's node-local live entity table.
 ensure_entity_table(SectorId) ->
     Table = entity_table(SectorId),
+    %% Reuse the table when only the controller process restarted.
     case ets:whereis(Table) of
         undefined -> ets:new(Table, [named_table, public, set, heir_option(),
             {read_concurrency, true}, {write_concurrency, true}]);
@@ -279,7 +285,7 @@ ensure_entity_table(SectorId) ->
 %% Gives every configured sector a stable node-local ETS table name.
 entity_table(SectorId) -> list_to_atom(atom_to_list(SectorId) ++ "_entities").
 
-%% Loads snapshot entries only when starting with an empty table.
+%% Loads saved missiles only when the table has no newer live data.
 restore_table(Table, Entities) ->
     case ets:first(Table) of
         '$end_of_table' -> maps:foreach(fun(Id, Entity) ->
@@ -289,7 +295,7 @@ restore_table(Table, Entities) ->
         _Existing -> ok
     end.
 
-%% Keeps the table alive if only the controller process is restarted.
+%% Gives the table to the supervisor if this controller stops.
 heir_option() ->
     case get('$ancestors') of
         [Supervisor | _] when is_pid(Supervisor) -> {heir, Supervisor, none};

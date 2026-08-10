@@ -6,10 +6,10 @@
 -export([start_link/0]).
 -export([init/1]).
 
-%% Starts the root supervisor.
+%% Starts the root supervisor; used by app.
 start_link() -> supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
-%% A coordinator runs cluster and graphics processes; a host runs node_manager.
+%% Chooses which processes run on this node.
 init([]) ->
     Role = configured_role(),
     io:format("[app] starting: node=~p role=~p~n", [node(), Role]),
@@ -31,6 +31,7 @@ configured_role() ->
 
 %% Defines the three permanent processes running on the coordinator.
 coordinator_children() ->
+    %% This service keeps the saved state used by graphics and recovery.
     SnapshotManager = #{
         id => snapshot_manager,
         start => {snapshot_manager, start_link, []},
@@ -39,6 +40,7 @@ coordinator_children() ->
         type => worker,
         modules => [snapshot_manager]
     },
+    %% Graphics starts after snapshot storage is ready.
     Graphics = #{
         id => graphics_server,
         start => {graphics_server, start_link, []},
@@ -47,6 +49,7 @@ coordinator_children() ->
         type => worker,
         modules => [graphics_server]
     },
+    %% The coordinator starts last and can now use both services.
     Coordinator = #{
         id => cluster_coordinator,
         start => {cluster_coordinator, start_link, []},

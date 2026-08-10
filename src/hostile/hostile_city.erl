@@ -4,16 +4,17 @@
 -export([start_link/1, snapshot/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
 
-%% Starts one hostile city and its launch timer.
+%% Starts a hostile city; used by sector_supervisor.
 start_link(Options) -> gen_server:start_link(?MODULE, Options, []).
 
-%% Returns the launch counter required for checkpoint recovery.
+%% Returns recovery state; used by sector_supervisor.
 snapshot(Pid) -> gen_server:call(Pid, snapshot).
 
-%% Keeps only identity, process references, and mutable runtime data.
+%% Creates the city state and starts its first launch timer.
 init(#{id := CityId, x := X, sector_id := SectorId,
         sector_controller := SectorController} = Options) ->
     SpawnMs = config:hostile_city(spawn_ms),
+    %% Give each city a different first launch time.
     schedule_launch(rand:uniform(SpawnMs + 1) - 1),
     {ok, #{
         id => CityId, x => float(X),
@@ -21,16 +22,16 @@ init(#{id := CityId, x := X, sector_id := SectorId,
         next_missile => maps:get(next_missile, Options, 1)
     }}.
 
-%% Handles checkpoint and debugging requests.
+%% Returns saved city state when requested.
 handle_call(snapshot, _From, #{next_missile := NextMissile} = State) ->
     {reply, #{next_missile => NextMissile}, State};
 handle_call(get_state, _From, State) -> {reply, State, State};
 handle_call(Request, _From, State) -> {reply, {error, {unsupported_call, Request}}, State}.
 
-%% Ignores unsupported asynchronous requests.
+%% Ignores messages this city does not use.
 handle_cast(_Message, State) -> {noreply, State}.
 
-%% Launches a missile and schedules the next launch from global config.
+%% Launches a missile when the timer fires.
 handle_info(launch, State) ->
     schedule_launch(config:hostile_city(spawn_ms)),
     case config:paused() of
@@ -45,6 +46,7 @@ launch_missile_handler(#{
         sector_id := SectorId, sector_controller := SectorController,
         next_missile := Number
     } = State) ->
+    %% Pick a protected city and calculate a flight toward it.
     {TargetId, TargetX} = random_target(config:protected_cities()),
     StartPosition = {X, 0.0},
     TargetPosition = {TargetX, 0.0},
@@ -54,6 +56,7 @@ launch_missile_handler(#{
         config:hostile_missile(speed_range)
     ),
     MissileId = {hostile_missile, {origin, SectorId}, CityId, Number},
+    %% Keep the data needed to move or restore the missile.
     Options = #{
         id => MissileId, position => StartPosition, velocity => {Vx, Vz},
         target_id => TargetId, target_position => TargetPosition,
@@ -62,6 +65,7 @@ launch_missile_handler(#{
     case sector_controller:start_child(SectorController, MissileId, hostile_missile,
             [Options], temporary) of
         {ok, MissilePid} ->
+            %% Register the missile before its first movement update.
             ok = sector_controller:register_entity(
                 SectorController, MissileId, hostile_missile, MissilePid),
             sector_controller:report_launch(SectorController),

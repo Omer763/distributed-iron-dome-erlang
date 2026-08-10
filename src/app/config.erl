@@ -23,66 +23,69 @@
     protected_cities/0
 ]).
 
-%% Reads one global radar setting.
+%% Shared configuration API used by simulation, cluster, and graphics modules.
+
+%% Reads one radar setting; used by iron_dome_radar.
 radar(Key) -> component_value(radar, Key).
 
-%% Reads one global launcher setting.
+%% Reads one launcher setting; used by iron_dome_launcher.
 launcher(Key) -> component_value(launcher, Key).
 
-%% Reads one global interceptor setting.
+%% Reads one interceptor setting; used by interceptor and physics modules.
 interceptor(Key) -> component_value(interceptor, Key).
 
-%% Reads one global hostile-city setting.
+%% Reads one city setting; used by hostile_city and graphics.
 hostile_city(Key) -> component_value(hostile_city, Key).
 
-%% Reads one global hostile-missile setting.
+%% Reads one hostile setting; used by hostile missile and computer modules.
 hostile_missile(Key) -> component_value(hostile_missile, Key).
 
-%% Reads the shared movement interval for every missile.
+%% Reads the movement interval; used by both missile modules.
 tick_ms() -> application:get_env(iron_dome, tick_ms, 50).
 
-%% Returns whether this worker should freeze its simulation processes.
+%% Reports simulation pause state; used by active simulation modules.
 paused() -> application:get_env(iron_dome, simulation_paused, false).
 
-%% Pauses or resumes simulation processes on the current Erlang node.
+%% Sets local pause state; used by cluster_coordinator and graphics.
 set_paused(Value) when is_boolean(Value) ->
     application:set_env(iron_dome, simulation_paused, Value).
 
-%% Updates the shared missile movement interval on the current Erlang node.
+%% Sets the local movement interval; used by graphics.
 set_tick_ms(Value) when is_integer(Value), Value > 0 ->
     application:set_env(iron_dome, tick_ms, Value).
 
-%% Updates the hostile-city launch interval on the current Erlang node.
+%% Sets the local launch interval; used by graphics.
 set_spawn_ms(Value) when is_integer(Value), Value >= 0 ->
     set_component_value(hostile_city, spawn_ms, Value).
 
-%% Updates the interceptor hit chance on the current Erlang node.
+%% Sets local interceptor accuracy; used by graphics.
 set_interceptor_hit_chance(Value) when is_float(Value), Value >= 0.0, Value =< 1.0 ->
     set_component_value(interceptor, hit_chance, Value).
 
-%% Updates the hostile-missile accuracy on the current Erlang node.
+%% Sets local hostile accuracy; used by graphics.
 set_hostile_accuracy(Value) when is_float(Value), Value >= 0.0, Value =< 1.0 ->
     set_component_value(hostile_missile, accuracy, Value).
 
-%% Returns the node running coordinator-only services.
+%% Returns the coordinator node; used by cluster and graphics clients.
 coordinator_node() ->
     case os:getenv("IRON_DOME_COORDINATOR") of
         false -> application:get_env(iron_dome, coordinator_node, node());
         Name -> list_to_atom(Name)
     end.
 
-%% Stores the current sector ownership map on this Erlang node.
+%% Stores sector ownership; used by cluster and snapshot managers.
 set_assignments(Assignments) when is_map(Assignments) ->
     application:set_env(iron_dome, sector_assignments, Assignments).
 
-%% Returns the controller address for the node currently owning a sector.
+%% Resolves a controller; used by simulation and cluster modules.
 sector_controller(SectorId) -> sector_component(SectorId, sector_controller:name(SectorId)).
 
-%% Returns the computer address for the node currently owning a sector.
+%% Resolves a computer; used by radar and snapshot modules.
 sector_computer(SectorId) -> sector_component(SectorId, iron_dome_computer:name(SectorId)).
 
-%% Returns the sector containing an X coordinate.
+%% Finds a sector by X coordinate; used by missile and computer modules.
 sector_at(X) ->
+    %% Find the first horizontal range that contains X.
     case [SectorId || 
             {SectorId, {MinX, MaxX}} <- sector_boundaries(),
             X >= MinX, X < MaxX] of
@@ -90,11 +93,11 @@ sector_at(X) ->
         [] -> none
     end.
 
-%% Returns all configured sector ranges.
+%% Returns sector ranges; used across cluster, graphics, and simulation modules.
 sector_boundaries() ->
     [{maps:get(sector_id, Config), maps:get(bounds, Config)} || Config <- sectors()].
 
-%% Returns every configured protected city.
+%% Returns protected cities; used by iron_dome_computer and graphics.
 protected_cities() ->
     lists:flatmap(
         fun(Config) -> maps:get(protected_cities, Config, []) end,
@@ -108,6 +111,7 @@ component_value(Component, Key) ->
 
 %% Changes one value while preserving every other simulation setting.
 set_component_value(Component, Key, Value) ->
+    %% Keep every old setting except the one being changed.
     Defaults = application:get_env(iron_dome, defaults, #{}),
     ComponentValues = maps:get(Component, Defaults, #{}),
     application:set_env(
@@ -118,6 +122,7 @@ set_component_value(Component, Key, Value) ->
 
 %% Combines a component's node-local name with the current sector owner.
 sector_component(SectorId, Name) ->
+    %% Add the owner node because the process name is only local to that node.
     Assignments = application:get_env(iron_dome, sector_assignments, #{}),
     case maps:find(SectorId, Assignments) of
         {ok, Node} -> {ok, {Name, Node}};

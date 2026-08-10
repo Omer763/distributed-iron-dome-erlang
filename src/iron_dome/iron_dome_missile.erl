@@ -4,17 +4,18 @@
 -export([start_link/1]).
 -export([callback_mode/0, init/1, guiding/3]).
 
-%% Starts one temporary interceptor.
+%% Starts an interceptor; used by sector_supervisor and sector_controller.
 start_link(Options) -> gen_statem:start_link(?MODULE, Options, []).
 
-%% Uses one callback function for the interceptor's single state.
+%% Uses guiding/3 to handle interceptor events.
 callback_mode() -> state_functions.
 
-%% Builds the interceptor state and immediately starts guidance.
+%% Creates the interceptor state and starts movement.
 init(#{id := Id, position := {X, Z}, target_id := TargetId,
         target_position := TargetPosition, time_to_target := Time,
         sector_id := SectorId, sector_controller := Controller}) ->
     Position = {float(X), float(Z)},
+    %% Use a straight path that reaches the meeting point on time.
     Velocity = physics:velocity_to_arrive(Position, TargetPosition, Time),
     State = #{id => Id, position => Position, velocity => Velocity,
         target_id => TargetId, target_position => TargetPosition,
@@ -22,7 +23,7 @@ init(#{id := Id, position := {X, Z}, target_id := TargetId,
         sector_id => SectorId, sector_controller => Controller},
     {ok, guiding, State, [{state_timeout, 0, move}]}.
 
-%% Moves toward the fixed predicted interception point unless recovery paused the simulation.
+%% Moves the interceptor when its timer fires.
 guiding(state_timeout, move, State) ->
     case config:paused() of
         true -> {keep_state, State#{last_tick => physics:timestamp()},
@@ -35,6 +36,7 @@ guiding(_EventType, _Event, State) -> {keep_state, State}.
 move_handler(#{position := Position, velocity := Velocity, remaining_time := Remaining,
         last_tick := LastTick} = State) ->
     {Elapsed, Now} = physics:elapsed_seconds(LastTick),
+    %% Never move past the planned explosion time.
     Step = min(Elapsed, Remaining),
     NewState = State#{position => physics:linear_step(Position, Velocity, Step),
         remaining_time => max(0.0, Remaining - Step), last_tick => Now},
@@ -55,9 +57,11 @@ detonate(#{position := Position, target_id := TargetId, id := InterceptorId} = S
 
 %% Destroys the assigned hostile when it is inside the blast radius.
 hit_target(Position, TargetPid, TargetId, InterceptorId) ->
+    %% The target may disappear while this interceptor checks it.
     case hostile_position(TargetPid) of
         {ok, TargetPosition} ->
             Distance = physics:distance(Position, TargetPosition),
+            %% Check hit chance only when the target is inside the blast area.
             case Distance =< hit_radius() of
                 false -> {missed, {outside_radius, Distance}};
                 true ->
@@ -129,7 +133,7 @@ transfer(DestinationSector, #{sector_id := SectorId, id := Id} = State) ->
 schedule(State) ->
     {keep_state, State, [{state_timeout, config:tick_ms(), move}]}.
 
-%% Pushes the latest serializable state to the sector controller.
+%% Saves the latest interceptor state in its sector.
 update_controller(#{sector_id := SectorId, id := Id} = State) ->
     sector_controller:update_entity(SectorId, Id, entity_state(State)).
 

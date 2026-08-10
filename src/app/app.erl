@@ -1,14 +1,14 @@
 -module(app).
 
-%% Implements the OTP application start and stop callbacks.
+%% Starts and stops the application.
 -behaviour(application).
 
 -export([start/2, stop/1]).
 
-%% OTP calls this function to start the application process tree.
+%% Starts the main application processes.
 start(_StartType, _StartArgs) -> app_sup:start_link().
 
-%% OTP calls this function after the application process tree stops.
+%% Prints a message when the application stops.
 stop(_State) ->
     io:format("[app] stopped: node=~p~n", [node()]),
     ok.

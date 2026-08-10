@@ -26,12 +26,11 @@
 -define(RESET_BUTTON, 1006).
 -define(RESOURCE_CACHE, graphics_resource_cache).
 
-%% Creates the wx window, without ever crashing the coordinator's
-%% supervisor tree if no display is available (missing DISPLAY, no wx
-%% library, etc.). Sector hosting and cluster management must keep
-%% working even when nothing can be drawn on screen.
+%% Opens wx safely; used by graphics_server.
+%% Display failures leave the coordinator running headless.
 open_window() ->
     try
+        %% Create the window, panel, and off-screen drawing area.
         put(?RESOURCE_CACHE, #{}),
         Wx = wx:new(),
         Frame = wxFrame:new(wx:null(), -1, "Distributed Iron Dome", [{size, {?WIDTH, ?HEIGHT}}]),
@@ -39,6 +38,7 @@ open_window() ->
         wxPanel:setBackgroundColour(Panel, {25, 55, 30}),
         BackBuffer = wxBitmap:new(?WIDTH, ?HEIGHT),
         Controls = create_controls(Panel, {?WIDTH, ?HEIGHT}),
+        %% Send window actions to graphics_server.
         wxFrame:connect(Frame, close_window),
         wxPanel:connect(Panel, size),
         wxPanel:connect(Panel, command_button_clicked),
@@ -56,13 +56,13 @@ open_window() ->
         Class:Reason -> {error, {Class, Reason}}
     end.
 
-%% Recreates the back buffer and repositions controls after a resize.
+%% Resizes window resources; used by graphics_server.
 resize_window(Window, {Width, Height}) ->
     wxBitmap:destroy(maps:get(back_buffer, Window)),
     position_controls(maps:get(controls, Window), {Width, Height}),
     Window#{back_buffer => wxBitmap:new(Width, Height), size => {Width, Height}}.
 
-%% Destroys the resources belonging to an open graphics window.
+%% Destroys window resources; used by graphics_server.
 close_window(#{frame := Frame, back_buffer := BackBuffer}) ->
     destroy_cached_resources(),
     wxBitmap:destroy(BackBuffer),
@@ -82,6 +82,7 @@ draw_frame(DC, GraphicsState) ->
     Layout = {Width, Height, GroundY},
     Transform = world_transform(SectorConfigs, Width),
     Metrics = frame_metrics(GraphicsState),
+    %% Draw the background first and the effects last.
     draw_stars(DC, Width, GroundY),
     draw_ground(DC, Layout),
     draw_global_statistics(DC, Metrics, Width),
@@ -90,8 +91,9 @@ draw_frame(DC, GraphicsState) ->
     draw_explosions(DC, GraphicsState, Transform, Layout),
     draw_global_percentages(DC, Metrics, Width).
 
-%% Draws a complete frame off-screen and copies it to the panel at once.
+%% Draws a buffered frame; used by graphics_server.
 draw_buffered_frame(Panel, BackBuffer, GraphicsState) ->
+    %% Draw off-screen first so the visible window does not flicker.
     {Width, Height} = maps:get(size, maps:get(window, GraphicsState)),
     DrawHeight = max(1, Height - ?CONTROL_BAR_HEIGHT),
     MemoryDC = wxMemoryDC:new(BackBuffer),
@@ -103,7 +105,7 @@ draw_buffered_frame(Panel, BackBuffer, GraphicsState) ->
     wxClientDC:destroy(PanelDC),
     wxMemoryDC:destroy(MemoryDC).
 
-%% Reads the optional headless environment override.
+%% Reports whether graphics are enabled; used by graphics_server.
 graphics_enabled() ->
     case os:getenv("GRAPHICS_ENABLED") of
         "false" -> false;
@@ -111,18 +113,16 @@ graphics_enabled() ->
         _ -> application:get_env(iron_dome, graphics_enabled, true)
     end.
 
-%% Requests an orderly shutdown when the window is closed.
+%% Requests cluster shutdown; used by graphics_server.
 request_safe_shutdown() ->
     case whereis(cluster_coordinator) of
         undefined -> init:stop();
         _CoordinatorPid -> cluster_coordinator:shutdown()
     end.
 
-%% Creates live controls for movement, hostile launch timing, and the
-%% interceptor/enemy-missile hit percentages: a fixed label, an editable
-%% number box, and a fixed unit, so the box only ever holds the number
-%% itself.
+%% Creates controls for timing and missile accuracy settings.
 create_controls(Panel, Size) ->
+    %% Fill the boxes with the settings currently used by the simulation.
     TickMs = config:tick_ms(),
     SpawnMs = config:hostile_city(spawn_ms),
     HitChancePercent = round(config:interceptor(hit_chance) * 100),
@@ -135,6 +135,7 @@ create_controls(Panel, Size) ->
     StatusLabel = wxStaticText:new(Panel, ?wxID_ANY, ""),
     wxStaticText:setFont(StatusLabel, ButtonFont),
     wxFont:destroy(ButtonFont),
+    %% Keep every widget in one map so resize and button code can find it.
     Controls = #{
             tick_label => label(Panel, "Tick:"),
             tick_input => number_input(Panel, ?TICK_INPUT, TickMs),
@@ -172,9 +173,7 @@ number_input(Panel, Id, InitialValue) ->
     wxFont:destroy(Font),
     Input.
 
-%% Keeps the controls visible along the bottom when the window is
-%% resized, all four label/input/unit groups and the APPLY button in
-%% a single row.
+%% Keeps all setting controls in one row at the bottom of the window.
 position_controls(#{
         tick_label := TickLabel, tick_input := TickInput, tick_unit := TickUnit,
         spawn_label := SpawnLabel, spawn_input := SpawnInput, spawn_unit := SpawnUnit,
@@ -186,6 +185,7 @@ position_controls(#{
     Top = max(0, Height - ?CONTROL_BAR_HEIGHT + 5),
     InputY = Top + 27,
     ButtonSpace = 140,
+    %% Share the free width equally between the four settings.
     GroupWidth = max(150, (Width - ButtonSpace - 20) div 4),
     TickX = 10,
     SpawnX = TickX + GroupWidth,
@@ -196,6 +196,7 @@ position_controls(#{
     place_control(InterceptorLabel, InterceptorInput, InterceptorUnit,
         InterceptorX, Top, InputY, GroupWidth),
     place_control(EnemyLabel, EnemyInput, EnemyUnit, EnemyX, Top, InputY, GroupWidth),
+    %% Keep the buttons and result text together on the right.
     ButtonX = Width - 125,
     wxWindow:move(PostButton, {ButtonX, Top}),
     wxWindow:setSize(PostButton, {110, 34}),
@@ -220,11 +221,12 @@ place_input(Widget, X, Y, Width) ->
     wxWindow:move(Widget, {X, Y}),
     wxWindow:setSize(Widget, {Width, 30}).
 
-%% Reads and validates all four inputs; returns only parseable {Fun, Val} pairs.
+%% Validates control values; used by graphics_server.
 read_config_inputs(#{
         tick_input := TickInput, spawn_input := SpawnInput,
         interceptor_input := InterceptorInput, enemy_input := EnemyInput
     }) ->
+    %% Invalid values create no update and leave the old setting unchanged.
     TickEntry = case parse_integer(wxTextCtrl:getValue(TickInput)) of
         {ok, Tick} when Tick > 0 -> [{set_tick_ms, Tick}];
         _ -> []
@@ -243,11 +245,11 @@ read_config_inputs(#{
     end,
     TickEntry ++ SpawnEntry ++ InterceptorEntry ++ EnemyEntry.
 
-%% Applies all config entries to each node via rpc:call; returns nodes that failed.
+%% Applies settings cluster-wide; used by graphics_server.
 apply_config_to_nodes(Config, Nodes) ->
     [Node || Node <- Nodes, not apply_config_to_node(Config, Node)].
 
-%% Starts fresh statistics in every sector while leaving cities running.
+%% Resets sector statistics; used by graphics_server.
 reset_statistics() ->
     lists:foreach(fun({SectorId, _Bounds}) ->
         case config:sector_controller(SectorId) of
@@ -268,7 +270,7 @@ apply_config_to_node(Config, Node) ->
         Config
     ).
 
-%% Updates the status label text and color.
+%% Updates control status; used by graphics_server.
 set_status_label(#{status_label := Label}, Text, Color) ->
     wxStaticText:setLabel(Label, Text),
     wxStaticText:setForegroundColour(Label, Color).
@@ -307,9 +309,7 @@ draw_stars(DC, Width, GroundY) ->
         cached_stars(Width, GroundY)
     ).
 
-%% Returns 220 star positions confined to the sky, regenerated only when
-%% the window is resized. Cached in the process dictionary so the same
-%% stars stay put from frame to frame instead of twinkling randomly.
+%% Returns the same stars until the window size changes.
 cached_stars(Width, GroundY) ->
     case get(stars) of
         {{Width, GroundY}, Points} ->
@@ -335,6 +335,7 @@ draw_ground(DC, {Width, Height, GroundY}) ->
 draw_sectors(DC, SectorConfigs, GraphicsState, Metrics, Transform,
         {Width, _Height, GroundY} = Layout) ->
     Assignments = maps:get(assignments, maps:get(cluster, GraphicsState, #{}), #{}),
+    %% Draw each sector inside its own horizontal screen range.
     lists:foreach(
         fun(Config) ->
             SectorId = maps:get(sector_id, Config),
@@ -357,6 +358,7 @@ draw_sectors(DC, SectorConfigs, GraphicsState, Metrics, Transform,
 draw_static_objects(DC, Config, Transform, {_Width, _Height, GroundY}) ->
     {_MinX, Scale} = Transform,
     CityRadiusPixels = max(2, round(config:hostile_missile(city_hit_radius) * Scale)),
+    %% Hostile and protected cities use different colors.
     lists:foreach(
         fun(City) ->
             X = maps:get(x, City),
@@ -383,6 +385,7 @@ draw_static_objects(DC, Config, Transform, {_Width, _Height, GroundY}) ->
 %% Draws every active missile from sector snapshots.
 draw_entities(DC, GraphicsState, Transform, Layout) ->
     Snapshots = maps:get(snapshots, GraphicsState, #{}),
+    %% Each sector state contains the missiles currently inside it.
     maps:foreach(
         fun(_SectorId, Snapshot) ->
             Entities = maps:get(entities, Snapshot, #{}),
@@ -601,6 +604,7 @@ city_counts(SectorConfigs) ->
 %% Calculates all entity counts and statistics in one snapshot traversal.
 frame_metrics(GraphicsState) ->
     Cluster = maps:get(cluster, GraphicsState, #{}),
+    %% Count once, then reuse the totals for every text panel.
     Initial = #{hostile_count => 0, interceptor_count => 0,
         hostile_air => #{}, interceptor_air => #{}, sector_statistics => #{},
         online_hosts => length(maps:get(live_nodes, Cluster, [])),
@@ -635,7 +639,7 @@ count_entity(_Id, #{type := iron_dome_missile}, Metrics) ->
     Metrics#{interceptor_count => maps:get(interceptor_count, Metrics) + 1};
 count_entity(_Id, _Entity, Metrics) -> Metrics.
 
-%% Adds one sector's monotonic statistics to the global totals.
+%% Adds one sector's counters to the totals shown on screen.
 add_statistics(Statistics, Totals) ->
     Totals#{
         fired => maps:get(fired, Totals) + maps:get(hostile_missiles_fired, Statistics, 0),
@@ -699,6 +703,7 @@ cached_draw_font() -> cached_resource(draw_font, fun() ->
 end).
 
 cached_resource(Key, Create) ->
+    %% Create each expensive wx drawing object only once.
     Cache = case get(?RESOURCE_CACHE) of undefined -> #{}; Value -> Value end,
     case maps:find(Key, Cache) of
         {ok, {_Type, Resource}} -> Resource;

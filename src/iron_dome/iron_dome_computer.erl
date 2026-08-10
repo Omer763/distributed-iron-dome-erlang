@@ -7,19 +7,20 @@
 -define(CLEANUP_MS, 1000).
 -define(TRACK_TIMEOUT_US, 2000000).
 
-%% Starts one globally discoverable computer for a sector.
+%% Starts a sector computer; used by sector_supervisor.
 start_link(#{sector_id := SectorId} = Options) ->
     gen_server:start_link({local, name(SectorId)}, ?MODULE, Options, []).
 
-%% Returns this computer's node-local registered name.
+%% Returns the local name; used by config and sector_supervisor.
 name(SectorId) -> list_to_atom(atom_to_list(?MODULE) ++ "_" ++ atom_to_list(SectorId)).
 
-%% Returns the tracking state required for checkpoint recovery.
+%% Returns recovery state; used by snapshot_manager.
 snapshot(Pid) -> gen_server:call(Pid, snapshot).
 
-%% Builds the computer state and starts track cleanup.
+%% Restores radar tracks and starts the cleanup timer.
 init(#{sector_id := SectorId, sector_controller := Controller} = Options) ->
     schedule_cleanup(),
+    %% Give restored samples a new local time so cleanup keeps them.
     Restored = maps:get(restored_state, Options, #{}),
     Now = erlang:monotonic_time(microsecond),
     Samples = maps:map(fun(_Id, Track) -> Track#{last_seen => Now} end,
@@ -27,19 +28,19 @@ init(#{sector_id := SectorId, sector_controller := Controller} = Options) ->
     {ok, #{sector_id => SectorId, sector_controller => Controller,
         samples => Samples, classified => maps:get(classified, Restored, #{})}}.
 
-%% Returns portable tracking state or rejects unsupported requests.
+%% Returns saved tracking data when requested.
 handle_call(snapshot, _From, #{samples := Samples, classified := Classified} = State) ->
     PortableSamples = maps:map(fun(_Id, Track) -> maps:remove(last_seen, Track) end, Samples),
     {reply, #{samples => PortableSamples, classified => Classified}, State};
 handle_call(Request, _From, State) -> {reply, {error, {unsupported_call, Request}}, State}.
 
-%% Routes radar observations and missile termination messages.
+%% Saves radar samples and removes finished missile tracks.
 handle_cast({radar_sample, Id, Position, FlightTimeUs}, State) ->
     {noreply, record_sample_handler(Id, Position, FlightTimeUs, State)};
 handle_cast({missile_terminated, Id}, State) -> {noreply, remove_tracks([Id], State)};
 handle_cast(_Message, State) -> {noreply, State}.
 
-%% Periodically removes tracks no radar can still see.
+%% Removes tracks that have not received a recent radar sample.
 handle_info(cleanup_tracks, State) ->
     schedule_cleanup(),
     case config:paused() of
@@ -50,6 +51,7 @@ handle_info(_Message, State) -> {noreply, State}.
 
 %% Stores newer radar observations until the missile is classified once.
 record_sample_handler(Id, Position, FlightTimeUs, #{samples := Samples} = State) ->
+    %% Ignore a sample older than one already received.
     OldTrack = maps:get(Id, Samples, #{measurements => [], sampled_at => FlightTimeUs - 1}),
     case FlightTimeUs > maps:get(sampled_at, OldTrack) of
         false -> State;
@@ -58,6 +60,7 @@ record_sample_handler(Id, Position, FlightTimeUs, #{samples := Samples} = State)
             Track = #{measurements => Measurements, sampled_at => FlightTimeUs,
                 last_seen => erlang:monotonic_time(microsecond)},
             NewState = State#{samples => Samples#{Id => Track}},
+            %% Three points are needed to rebuild the missile path.
             case length(Measurements) of
                 3 -> process_track(Id, Measurements, NewState);
                 _ -> NewState
@@ -74,10 +77,12 @@ process_track(Id, Measurements, #{classified := Classified} = State) ->
 
 %% Reconstructs a new track and decides whether it threatens a protected city.
 classify_track(Id, Measurements, #{classified := Classified} = State) ->
+    %% Rebuild the full path from the last three radar points.
     case physics:rebuild_ballistic_path(Measurements) of
         {ok, Path} ->
             case threatens_protected_city(Path) of
                 true ->
+                    %% Fire only when the path still has an apogee ahead.
                     case apogee_intercept(Path) of
                         {ok, Position, Time} ->
                             update_engagement(Id, Position, Time,
@@ -85,6 +90,7 @@ classify_track(Id, Measurements, #{classified := Classified} = State) ->
                         {error, _Reason} -> State
                     end;
                 false ->
+                    %% Mark harmless missiles so graphics can draw them gray.
                     mark_no_threat_if_owner(Id, State),
                     State#{classified => Classified#{Id => no_threat}}
             end;
@@ -93,6 +99,7 @@ classify_track(Id, Measurements, #{classified := Classified} = State) ->
 
 %% Lets only the computer owning the intercept point start the engagement.
 update_engagement(Id, Position, Time, #{sector_id := OwnSector} = State) ->
+    %% Only the sector containing the meeting point may fire.
     case config:sector_at(element(1, Position)) of
         OwnSector -> fire_intercept(Id, Position, Time, State);
         _OtherSector -> State
@@ -100,6 +107,7 @@ update_engagement(Id, Position, Time, #{sector_id := OwnSector} = State) ->
 
 %% Fires this sector's current launcher when the intercept is still possible.
 fire_intercept(Id, Position, Time, #{sector_controller := Controller} = State) when Time > 0.0 ->
+    %% The launcher belongs to the same sector as this computer.
     case sector_controller:launcher(Controller) of
         {ok, Launcher} ->
             _ = iron_dome_launcher:fire(Launcher, Id, Position, Time);

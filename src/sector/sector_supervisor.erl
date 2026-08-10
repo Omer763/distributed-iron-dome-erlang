@@ -4,20 +4,20 @@
 -export([start_link/1, name/1, controller/1, launcher/1, runtime_state/2, start_child/5]).
 -export([init/1]).
 
-%% Starts the supervision tree for one sector.
+%% Starts a sector tree; used by node_manager.
 start_link(#{sector_id := SectorId} = Config) ->
     supervisor:start_link({local, name(SectorId)}, ?MODULE, Config).
 
-%% Returns this sector supervisor's node-local registered name.
+%% Returns the local name; used by node_manager and sector_controller.
 name(SectorId) -> list_to_atom(atom_to_list(?MODULE) ++ "_" ++ atom_to_list(SectorId)).
 
-%% Returns the sector controller PID.
+%% Returns the controller PID; used by node_manager and snapshot_manager.
 controller(SectorId) -> child_pid(name(SectorId), sector_controller).
 
-%% Returns the sector launcher PID.
+%% Returns the launcher PID; used by sector_controller.
 launcher(SectorId) -> child_pid(name(SectorId), iron_dome_launcher).
 
-%% Returns launcher and hostile-city counters for checkpoint recovery.
+%% Returns recovery state; used by snapshot_manager.
 runtime_state(Node, SectorId) ->
     Children = supervisor:which_children({name(SectorId), Node}),
     {iron_dome_launcher, LauncherPid, worker, _} =
@@ -26,18 +26,20 @@ runtime_state(Node, SectorId) ->
         || {{hostile_city, CityId}, Pid, worker, _} <- Children, is_pid(Pid)]),
     #{launcher => iron_dome_launcher:snapshot(LauncherPid), hostile_cities => Cities}.
 
-%% Starts a temporary missile or interceptor under this supervisor.
+%% Starts a temporary entity; used by sector_controller.
 start_child(SectorId, ChildId, Module, Args, Restart) ->
     Spec = #{id => ChildId, start => {Module, start_link, Args}, restart => Restart,
         shutdown => 5000, type => worker, modules => [Module]},
     supervisor:start_child(name(SectorId), Spec).
 
-%% Defines the permanent processes belonging to one sector.
+%% Builds the permanent processes for one sector.
 init(#{sector_id := SectorId} = Config) ->
     Controller = sector_controller:name(SectorId),
+    %% Read saved launcher, computer, and city data when recovering.
     Snapshot = maps:get(snapshot, Config, #{}),
     Runtime = maps:get(runtime_state, Snapshot, #{}),
     ControllerSpec = child(sector_controller, sector_controller, [Config]),
+    %% Radar, launcher, and computer all use the same sector controller.
     RadarSpec = child(radar, iron_dome_radar,
         [#{sector_id => SectorId, sector_controller => Controller}]),
     LauncherConfig = maps:get(launcher, Config),
@@ -47,6 +49,7 @@ init(#{sector_id := SectorId} = Config) ->
     ComputerSpec = child(iron_dome_computer, iron_dome_computer,
         [#{sector_id => SectorId, sector_controller => Controller,
             restored_state => maps:get(computer_state, Snapshot, #{})}]),
+    %% Create one process for each hostile city in this sector.
     CitySpecs = [child({hostile_city, maps:get(id, City)}, hostile_city,
         [(maps:merge(City, maps:get(maps:get(id, City),
             maps:get(hostile_cities, Runtime, #{}), #{})))#{

@@ -10,27 +10,28 @@
 -define(POST_BUTTON, 1005).
 -define(RESET_BUTTON, 1006).
 
-%% Starts the graphics server locally on the coordinator node.
+%% Starts the graphics server; used by app_sup.
 start_link() -> gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-%% Returns the current display state.
+%% Returns display state; used by diagnostics.
 state() -> gen_server:call(server(), state).
 
-%% Adds an explosion tagged with its sector and source node.
+%% Adds an explosion; used by both missile modules.
 explosion(SectorId, Position, Type) ->
     gen_server:cast(server(), {explosion, SectorId, node(), Position, Type}).
 
-%% Clears effects and blocks or enables explosions during rollback.
+%% Toggles recovery display state; used by cluster_coordinator.
 set_recovering(Value) when is_boolean(Value) ->
     gen_server:cast(server(), {recovering, Value}).
 
-%% Updates worker membership and ownership after a cluster change.
+%% Updates displayed cluster state; used by cluster_coordinator.
 set_cluster(Assignments, LiveNodes) ->
     gen_server:cast(server(), {cluster, Assignments, LiveNodes}).
 
-%% Loads current snapshots and optionally opens the graphics window.
+%% Loads the first screen state and opens the window when enabled.
 init([]) ->
     {ok, FrameMs} = application:get_env(iron_dome, graphics_sync_ms),
+    %% Keep simulation data even when no window can be opened.
     BaseState = #{snapshots => current_snapshots(),
         cluster => #{assignments => #{}, live_nodes => []}, explosions => [],
         recovering => false, frame_ms => FrameMs, window => disabled},
@@ -47,11 +48,11 @@ init([]) ->
         false -> {ok, BaseState}
     end.
 
-%% Handles display-state queries.
+%% Returns the current screen state.
 handle_call(state, _From, State) -> {reply, State, State};
 handle_call(Request, _From, State) -> {reply, {error, {unsupported_call, Request}}, State}.
 
-%% Updates recovery and ownership without blocking cluster recovery on the GUI.
+%% Updates recovery, cluster, and explosion data.
 handle_cast({recovering, true}, State) ->
     {noreply, State#{recovering => true, explosions => []}};
 handle_cast({recovering, false}, State) -> {noreply, State#{recovering => false}};
@@ -61,9 +62,11 @@ handle_cast({cluster, Assignments, LiveNodes}, State) ->
 %% Stores explosion effects.
 handle_cast({explosion, SectorId, Host, {X, Z}, Type},
         #{explosions := Explosions} = State) when is_number(X), is_number(Z) ->
+    %% Ignore an effect from a node that no longer owns the sector.
     case valid_explosion(SectorId, Host, State) of
         false -> {noreply, State};
         true ->
+            %% Give the effect an ID so its timer removes the right one.
             Id = erlang:unique_integer([monotonic, positive]),
             Explosion = #{id => Id, position => {float(X), float(Z)}, type => Type,
                 started_at => erlang:monotonic_time(millisecond), duration_ms => ?EXPLOSION_MS},
@@ -75,9 +78,11 @@ handle_cast(_Message, State) -> {noreply, State}.
 %% Draws the latest frame.
 handle_info(draw, #{window := #{panel := Panel, back_buffer := Buffer}, frame_ms := FrameMs} = State) ->
     StartedAt = erlang:monotonic_time(millisecond),
+    %% Read sector states once for this complete frame.
     NewState = State#{snapshots => current_snapshots()},
     graphics:draw_buffered_frame(Panel, Buffer, NewState),
     DrawTime = erlang:monotonic_time(millisecond) - StartedAt,
+    %% Subtract drawing time to keep a steady frame speed.
     erlang:send_after(max(0, FrameMs - DrawTime), self(), draw),
     {noreply, NewState};
 
@@ -107,6 +112,7 @@ handle_info({config_result, [], _Config, _Retries}, #{window := #{controls := Co
     {noreply, State};
 handle_info({config_result, Failed, Config, Retries}, #{window := #{controls := Controls}} = State)
         when Retries > 0 ->
+    %% Retry only the nodes that did not accept the settings.
     graphics:set_status_label(Controls, "RETRYING...", {255, 200, 50}),
     Self = self(),
     spawn(fun() ->

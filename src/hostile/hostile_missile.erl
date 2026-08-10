@@ -4,26 +4,25 @@
 -export([start_link/1, intercept/2, position/1, mark_no_threat/1]).
 -export([callback_mode/0, init/1, flying/3]).
 
-%% Starts one hostile missile process.
+%% Starts a hostile missile; used by sector_supervisor and sector_controller.
 start_link(Options) -> gen_statem:start_link(?MODULE, Options, []).
 
-%% Tells the missile that an interceptor destroyed it.
+%% Destroys the target missile; used by iron_dome_missile.
 intercept(Pid, InterceptorId) -> gen_statem:call(Pid, {intercepted, InterceptorId}, 1000).
 
-%% Returns the missile position and its portable elapsed flight time.
-%% This flight clock can move with the missile between Erlang nodes.
+%% Returns portable flight state; used by radar and interceptor modules.
 position(Pid) -> gen_statem:call(Pid, position).
 
-%% Tells the missile the radar has determined it will not reach a
-%% protected city, so it is drawn as harmless and never counted as a hit.
+%% Marks a harmless missile; used by iron_dome_computer.
 mark_no_threat(Pid) -> gen_statem:cast(Pid, mark_no_threat).
 
-%% Uses the flying state function for all events.
+%% Uses flying/3 to handle missile events.
 callback_mode() -> state_functions.
 
-%% Registers the missile and starts its movement timer.
+%% Creates the missile state and starts its movement timer.
 init(#{id := Id, position := {X, Z}, velocity := {Vx, Vz}, sector_id := SectorId,
         sector_controller := SectorController} = Options) ->
+    %% A restored missile may already have flight time and target data.
     State = #{
         id => Id,
         position => {float(X), float(Z)},
@@ -38,8 +37,9 @@ init(#{id := Id, position := {X, Z}, velocity := {Vx, Vz}, sector_id := SectorId
     },
     {ok, flying, State, [{state_timeout, config:tick_ms(), move}]}.
 
-%% Advances the missile until it transfers, impacts, or is intercepted.
+%% Moves, answers position checks, and handles interception.
 flying(state_timeout, move, State) ->
+    %% Reset the clock while paused so paused time is not added to movement.
     case config:paused() of
         true -> {keep_state, State#{last_tick => physics:timestamp()},
             [{state_timeout, config:tick_ms(), move}]};
@@ -57,6 +57,7 @@ flying(_EventType, _Event, State) -> {keep_state, State}.
 advance(#{position := {X, Z}, velocity := {Vx, Vz}, last_tick := LastTick,
         flight_time_us := FlightTimeUs} = State) ->
     {Dt, Now} = physics:elapsed_seconds(LastTick),
+    %% Get the new position and falling speed for this time step.
     {{NewX, NewZ}, {NewVx, NewVz}} = physics:projectile_step({X, Z}, {Vx, Vz}, Dt),
     State#{
         position => {NewX, NewZ},
@@ -67,11 +68,13 @@ advance(#{position := {X, Z}, velocity := {Vx, Vz}, last_tick := LastTick,
 
 %% Terminates, transfers, or schedules the missile's next movement.
 next_step(#{id := Id, position := {X, _Z} = Position, sector_id := SectorId} = State) ->
+    %% Ground impact ends the flight before sector movement is checked.
     case physics:reached_ground(Position) of
         true -> terminate(impacted, State);
         false ->
             case config:sector_at(X) of
                 DestinationSector when DestinationSector =/= none, DestinationSector =/= SectorId ->
+                    %% Move the missile state to the sector that now contains it.
                     transfer(State, DestinationSector);
                 none ->
                     terminate(left_environment, State);
@@ -81,13 +84,10 @@ next_step(#{id := Id, position := {X, _Z} = Position, sector_id := SectorId} = S
             end
     end.
 
-%% Starts the missile in the destination sector before stopping this
-%% process. Registers directly with the destination's own controller
-%% instead of relaying through the source sector's controller -- relaying
-%% would tie up that shared, high-traffic process for the whole round
-%% trip on every transfer, which stops scaling once many missiles cross
-%% sector boundaries at once.
+%% Starts the missile remotely before stopping its local process.
+%% Direct registration avoids blocking the busy source controller.
 transfer(#{sector_id := SectorId, id := Id} = State, DestinationSector) ->
+    %% Start the new copy before removing the old copy.
     case config:sector_controller(DestinationSector) of
         {ok, Destination} ->
             case safe_accept_missile(Destination, Id, public_state(State)) of
@@ -104,8 +104,7 @@ keep_flying(#{sector_id := SectorId, id := Id} = State) ->
     sector_controller:update_entity(SectorId, Id, public_state(State)),
     {keep_state, State, [{state_timeout, config:tick_ms(), move}]}.
 
-%% Registers with the destination sector without crashing if it is
-%% unreachable or unresponsive.
+%% Tries the new sector without crashing when that node is offline.
 safe_accept_missile(Destination, Id, MissileState) ->
     try sector_controller:accept_missile(Destination, Id, MissileState) of
         Result -> Result
@@ -118,6 +117,7 @@ terminate(Result, State) -> terminate(Result, State, []).
 
 %% Converts ground contact into a verified city hit or another impact.
 terminate(impacted, #{target_id := TargetId, target_position := TargetPosition} = State, Actions) ->
+    %% Ground contact counts as a city hit only inside the city's radius.
     Result =
         case TargetPosition of
             undefined -> {ground_impact, unknown_target};
@@ -130,9 +130,8 @@ terminate(impacted, #{target_id := TargetId, target_position := TargetPosition} 
         end,
     terminate(Result, State, Actions);
 
-%% Records the result, removes the missile, and optionally replies. A
-%% missile the radar already ruled harmless never counts in statistics,
-%% whatever it actually collides with or lands on.
+%% Saves the result and stops the missile.
+%% A harmless missile does not change the statistics.
 terminate(Result, #{sector_id := SectorId, id := Id, threat := Threat} = State, Actions) ->
     StatisticResult =
         case Threat of
@@ -144,9 +143,8 @@ terminate(Result, #{sector_id := SectorId, id := Id, threat := Threat} = State, 
     notify_termination(Id, config:sector_boundaries()),
     {stop_and_reply, normal, Actions, State}.
 
-%% Returns only state that can be stored in a snapshot. flight_time_us
-%% carries over so a transferred or restored missile's simulated clock
-%% keeps counting from launch instead of resetting to zero.
+%% Returns the data needed to move or restore the missile.
+%% flight_time_us keeps the flight clock from starting again at zero.
 public_state(#{position := Position, velocity := Velocity, flight_time_us := FlightTimeUs,
         target_id := TargetId, target_position := TargetPosition, threat := Threat}) ->
     #{position => Position, velocity => Velocity, flight_time_us => FlightTimeUs,

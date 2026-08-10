@@ -15,22 +15,24 @@
 
 -define(GRAVITY, 10.0).
 
-%% Returns a node-local timestamp for measuring one process's movement.
+%% Returns a movement timestamp; used by both missile modules.
 timestamp() -> erlang:monotonic_time(microsecond).
 
-%% Returns elapsed seconds and a new timestamp for the next movement.
+%% Returns elapsed time; used by both missile modules.
 elapsed_seconds(Previous) ->
     Current = timestamp(),
     {(Current - Previous) / 1000000.0, Current}.
 
-%% Calculates a valid ballistic launch velocity toward a ground target.
+%% Calculates launch velocity; used by hostile_city.
 ballistic_launch_velocity({X, _Z}, {TargetX, _TargetZ}, {MinSpeed, MaxSpeed}) ->
     Distance = abs(float(TargetX) - float(X)),
+    %% Raise a speed that is too low to reach the target.
     RandomSpeed = random_between(MinSpeed, MaxSpeed),
     Speed = max(RandomSpeed, math:sqrt(?GRAVITY * Distance) + 1.0),
     SinTwoTheta = min(1.0, ?GRAVITY * Distance / (Speed * Speed)),
     LowAngle = math:asin(SinTwoTheta) / 2.0,
     HighAngle = math:pi() / 2.0 - LowAngle,
+    %% Both angles reach the target, so choose one allowed by the settings.
     Angle = launch_angle(LowAngle, HighAngle),
     Direction =
         case TargetX >= X of
@@ -47,12 +49,13 @@ launch_angle(LowAngle, HighAngle) ->
         false -> LowAngle
     end.
 
-%% Applies the configured hostile-missile accuracy to a target position.
+%% Applies hostile accuracy; used by hostile_city.
 aim_position({TargetX, TargetZ} = TargetPosition) ->
     Accuracy = config:hostile_missile(accuracy),
     case Accuracy >= 1.0 of
         true -> TargetPosition;
         false ->
+            %% Add a random horizontal error based on the accuracy setting.
             Radius = config:hostile_missile(city_hit_radius),
             Sigma = Radius / (math:sqrt(2.0) * inverse_erf(Accuracy)),
             {TargetX + Sigma * standard_normal(), TargetZ}
@@ -69,9 +72,10 @@ inverse_erf(X) ->
     Part = 2.0 / (math:pi() * A) + Log / 2.0,
     math:sqrt(math:sqrt(Part * Part - Log / A) - Part).
 
-%% Advances a projectile by one time step under constant gravity.
+%% Advances a projectile; used by hostile_missile.
 projectile_step({X, Z}, {Vx, Vz}, Dt) ->
     EndZ = Z + Vz * Dt - 0.5 * ?GRAVITY * Dt * Dt,
+    %% Shorten this step when the missile reaches the ground during the tick.
     HitsGround = EndZ =< 0.0 andalso (Z > 0.0 orelse Vz < 0.0),
     Step = case HitsGround of
         true -> min(Dt, (Vz + math:sqrt(Vz * Vz + 2.0 * ?GRAVITY * Z)) / ?GRAVITY);
@@ -85,21 +89,23 @@ projectile_step({X, Z}, {Vx, Vz}, Dt) ->
     NewVz = Vz - ?GRAVITY * Step,
     {{NewX, NewZ}, {Vx, NewVz}}.
 
-%% Returns true when a projectile has reached ground level.
+%% Tests for ground impact; used by hostile_missile.
 reached_ground({_X, Z}) ->
     Z =< 0.0.
 
-%% Calculates constant velocity needed to reach a point at a given time.
+%% Calculates intercept velocity; used by launcher and interceptor modules.
 velocity_to_arrive({StartX, StartZ}, {TargetX, TargetZ}, TimeSeconds) when TimeSeconds > 0.0 ->
     {(TargetX - StartX) / TimeSeconds, (TargetZ - StartZ) / TimeSeconds}.
 
-%% Rebuilds the ballistic path from three timed radar observations.
+%% Rebuilds a ballistic path; used by iron_dome_computer.
 rebuild_ballistic_path([{T0, {X0, Z0}}, {T1, {X1, Z1}}, {T2, {X2, Z2}}])
         when T0 < T1, T1 < T2 ->
+    %% Treat the newest sample as time zero.
     Times = [(T0 - T2) / 1000000.0, (T1 - T2) / 1000000.0, 0.0],
     Vx = line_slope(Times, [X0, X1, X2]),
     CorrectedZ = [Z + 0.5 * ?GRAVITY * T * T
         || {Z, T} <- lists:zip([Z0, Z1, Z2], Times)],
+    %% Remove gravity from the samples before finding vertical speed.
     Vz = line_slope(Times, CorrectedZ),
     predict_trajectory({X2, Z2}, Vx, Vz);
 rebuild_ballistic_path(_Samples) ->
@@ -114,8 +120,7 @@ line_slope(Times, Values) ->
     Denominator = lists:sum([math:pow(T - MeanT, 2) || T <- Times]),
     Numerator / Denominator.
 
-%% Predicts where a ballistic path reaches Vz = 0 (its apex) and where it
-%% eventually reaches the ground, from current position and velocity.
+%% Predicts the path apex and ground impact.
 predict_trajectory(_CurrentPosition, _Vx, Vz) when Vz =< 0.0 ->
     {error, passed_apogee};
 predict_trajectory({CurrentX, CurrentZ}, Vx, Vz) ->
@@ -134,11 +139,11 @@ predict_trajectory({CurrentX, CurrentZ}, Vx, Vz) ->
         time_to_impact => TimeToImpact
     }}.
 
-%% Advances an object at constant velocity.
+%% Advances at constant velocity; used by iron_dome_missile.
 linear_step({X, Z}, {Vx, Vz}, DeltaSeconds) ->
     {X + Vx * DeltaSeconds, Z + Vz * DeltaSeconds}.
 
-%% Calculates straight-line distance between two points.
+%% Calculates point distance; used by iron_dome_missile.
 distance({X1, Z1}, {X2, Z2}) ->
     math:sqrt(math:pow(X2 - X1, 2) + math:pow(Z2 - Z1, 2)).
 
