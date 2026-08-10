@@ -138,7 +138,7 @@ Probability values use the range `0.0` to `1.0`. For example, `0.8` means 80%.
 
 ## Distributed Deployment
 
-Deployment is performed by `scripts/deploy.escript` from the coordinator computer. Only the coordinator needs the source code. The script:
+Deployment is performed by `deploy.escript` from the coordinator computer. Only the coordinator needs the source code. The script:
 
 1. Starts a temporary distributed Erlang node on the coordinator.
 2. Checks that every worker is reachable and correctly configured.
@@ -163,7 +163,7 @@ Use a unique host name and the correct LAN IP on every worker.
 Run the deployment from the project directory on the coordinator:
 
 ```bash
-./scripts/deploy.escript 10.0.0.30 \
+./deploy.escript 10.0.0.30 \
     host1@10.0.0.43 \
     host2@10.0.0.44 \
     host3@10.0.0.31

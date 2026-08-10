@@ -18,7 +18,7 @@ main([LocalIp | HostNames]) when HostNames =/= [] ->
         {graphics_enabled, true}, {cluster_nodes, Hosts}, {ebin_dir, Ebin} | Shared]),
     io:format("Deployment complete.~n"),
     receive stop -> ok end;
-main(_) -> io:format("Usage: deploy_rebar.escript <local-ip> <host1@ip> [host2@ip ...]~n").
+main(_) -> io:format("Usage: deploy.escript <local-ip> <host1@ip> [host2@ip ...]~n").
 
 compile(Root) ->
     Rebar = case os:find_executable("rebar3") of
