@@ -1,0 +1,58 @@
+%% Describes the Iron Dome OTP application.
+{application, iron_dome, [
+    %% Basic application information.
+    {description, "Distributed Iron Dome sector simulation"},
+    {vsn, "0.1.0"},
+
+    %% Process names that may be registered while the application runs.
+    {registered, [
+        app_sup,
+        node_manager,
+        cluster_coordinator,
+        snapshot_manager,
+        graphics_server
+    ]},
+
+    %% OTP calls app:start/2 when it starts this application.
+    {mod, {app, []}},
+
+    %% OTP applications that must start before this application.
+    {applications, [kernel, stdlib, wx]},
+
+    %% Default values used when no value is supplied by sys.config.
+    {env, [
+        {role, coordinator},
+        {graphics_enabled, true},
+        {snapshot_interval_ms, 100},
+        {checkpoint_history_ms, 5000},
+        {graphics_sync_ms, 33},
+        {tick_ms, 50},
+        {heartbeat_interval_ms, 100},
+        {heartbeat_timeout_ms, 400},
+        {cluster_nodes, []},
+        {sectors, []}
+    ]},
+
+    %% Erlang modules that belong to this application.
+    {modules, [
+        app,
+        app_sup,
+        cluster_coordinator,
+        config,
+        graphics,
+        graphics_server,
+        hostile_city,
+        hostile_missile,
+        iron_dome_computer,
+        iron_dome_launcher,
+        iron_dome_missile,
+        iron_dome_radar,
+        node_manager,
+        physics,
+        sector_controller,
+        sector_supervisor,
+        snapshot_manager
+    ]},
+
+    {licenses, ["Apache-2.0"]}
+]}.
