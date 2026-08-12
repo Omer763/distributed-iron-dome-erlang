@@ -1,0 +1,52 @@
+networks:
+  iron_dome_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 30.30.30.0/24
+          gateway: 30.30.30.1
+
+services:
+  erl_host1:
+    build: .
+    image: custom_erlang_ssh:27.1
+    container_name: erl_host1
+    hostname: erl_host1
+    networks:
+      iron_dome_net:
+        ipv4_address: 30.30.30.11
+    environment:
+      - NODE_NAME=erl_host1@30.30.30.11
+
+  erl_host2:
+    build: .
+    image: custom_erlang_ssh:27.1
+    container_name: erl_host2
+    hostname: erl_host2
+    networks:
+      iron_dome_net:
+        ipv4_address: 30.30.30.12
+    environment:
+      - NODE_NAME=erl_host2@30.30.30.12
+
+  erl_host3:
+    build: .
+    image: custom_erlang_ssh:27.1
+    container_name: erl_host3
+    hostname: erl_host3
+    networks:
+      iron_dome_net:
+        ipv4_address: 30.30.30.13
+    environment:
+      - NODE_NAME=erl_host3@30.30.30.13
+
+  erl_host4:
+    build: .
+    image: custom_erlang_ssh:27.1
+    container_name: erl_host4
+    hostname: erl_host4
+    networks:
+      iron_dome_net:
+        ipv4_address: 30.30.30.14
+    environment:
+      - NODE_NAME=erl_host4@30.30.30.14
