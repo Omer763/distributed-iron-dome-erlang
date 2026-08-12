@@ -25,7 +25,7 @@ inter-node interfaces, state machines), see
 | `distributed-iron-dome-erlang/LICENSE` | Apache License 2.0 |
 | `distributed-iron-dome-erlang/test/` | EUnit unit tests and Common Test integration suites (see the Testing section below) |
 | `distributed-iron-dome-erlang/.github/workflows/ci.yml` | CI: compile, EUnit, Common Test, Dialyzer on every push |
-| `docker-compose.yml` | Spins up 4 bare "worker" containers on one machine, for local testing without real hardware |
+| `Docker/docker-compose.yml`, `Docker/Dockerfile` | Docker Compose setup that spins up 4 bare "worker" containers on one machine, for local testing without real hardware — see the "Local multi-node test with Docker Compose" section below for exact commands |
 | `RUNNING_5_MACHINES.txt`, `read` | Original working notes this guide is based on and supersedes |
 | `PROJECT_REPORT.md` | Design/architecture report: process trees, interfaces, state machines |
 
@@ -68,8 +68,8 @@ on syntax newer than that (`gen_statem` in `state_functions` mode, maps,
 ETS, `erpc`), so nearby OTP 27 patch releases are expected to work too —
 but keep versions close across nodes regardless, since distributed Erlang
 assumes compatible peers, and use exactly 27.10 if you want your setup to
-match this guide precisely. The bundled `Dockerfile` builds its worker image
-from `erlang:27-slim`.
+match this guide precisely. The bundled `Docker/Dockerfile` builds its worker
+image from `erlang:27-slim`.
 
 ### `wx` (graphics) on the coordinator
 
@@ -140,31 +140,96 @@ Stop it with `Ctrl+C` twice, or by closing the window.
 
 The fastest way to exercise the *real* distributed behavior (4 worker nodes,
 sector load-balancing, live failover) on a single machine, using the bundled
-`docker-compose.yml`. It starts four bare `erl_hostN` containers on a private
-Docker network (`30.30.30.0/24`) with the exact flags a real worker machine
-would need. The coordinator itself still runs directly on your host machine
-(it needs `wx`, which the slim container image doesn't have).
+`Docker/docker-compose.yml` (Docker files live under the `Docker/` folder).
+It starts four bare `erl_hostN` containers on a private Docker network
+(`30.30.30.0/24`). Each container boots with nothing but an SSH server
+running (see `Docker/Dockerfile`) — no Erlang node starts by itself. You
+SSH into each container and start a plain `erl` node by hand, exactly the
+same command as the real-machine case in section 6 below, just reached over
+SSH instead of sitting at the machine. The coordinator itself still runs
+directly on your host machine (it needs `wx`, which the slim container
+image doesn't have).
+
+**Docker is a convenience here, not a requirement.** The actual worker
+requirement is just "a machine with Erlang/OTP installed" (see section 2
+above) — nothing about `cluster_coordinator` or `deploy.escript` cares
+whether that machine is bare metal, a VM, or a container. If you already
+have real machines on your network, skip straight to section 6 and start
+`erl` on each of them directly; that is the normal way to run this project.
+What Docker Compose buys you is being able to try the *same* four-worker
+setup without owning four separate machines — it stands in for them by
+running four lightweight containers side by side on one computer. That
+convenience has a cost: the coordinator and all four workers then compete
+for that one machine's CPU and RAM, so how smoothly the simulation runs
+depends entirely on that machine's hardware.
+
+All `docker compose` commands below are run from the repository root with
+`-f Docker/docker-compose.yml` (equivalently, `cd Docker` first and drop the
+`-f` flag — either works, since `docker-compose.yml` pins its network's real
+name to `iron_dome_net` regardless of which directory you run it from).
 
 ```bash
-# 1. Start the four worker containers
-docker compose up -d
-docker compose ps                      # confirm all 4 are "Up"
+# 1. Start the four worker containers (each boots with just an SSH server
+#    running — no Erlang node yet)
+cd distributed-iron-dome-erlang
+docker compose -f Docker/docker-compose.yml up -d
+docker compose -f Docker/docker-compose.yml ps     # confirm all 4 are "Up"
+```
 
-# 2. Find your host machine's IP on the compose network — this is the
+**2. SSH into each container and start its Erlang node** — one block below
+per container, each pasted into its **own terminal window/tab**, left
+running (same as "leave every window open" in section 6 — closing one
+removes that worker from the cluster). The login for every container is
+the same: user `tal`, password `1234` (set in `Docker/Dockerfile`).
+
+```bash
+ssh tal@30.30.30.11                    # password: 1234
+erl -name erl_host1@30.30.30.11 \
+    -setcookie iron_dome_cookie \
+    -kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100 \
+            prevent_overlapping_partitions false
+```
+
+```bash
+ssh tal@30.30.30.12                    # password: 1234
+erl -name erl_host2@30.30.30.12 \
+    -setcookie iron_dome_cookie \
+    -kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100 \
+            prevent_overlapping_partitions false
+```
+
+```bash
+ssh tal@30.30.30.13                    # password: 1234
+erl -name erl_host3@30.30.30.13 \
+    -setcookie iron_dome_cookie \
+    -kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100 \
+            prevent_overlapping_partitions false
+```
+
+```bash
+ssh tal@30.30.30.14                    # password: 1234
+erl -name erl_host4@30.30.30.14 \
+    -setcookie iron_dome_cookie \
+    -kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100 \
+            prevent_overlapping_partitions false
+```
+
+```bash
+# 3. Find your host machine's IP on the compose network — this is the
 #    address the containers can reach the coordinator on. It is normally
 #    the ".1" address of the compose subnet (30.30.30.1), but confirm it:
 ip addr show dev br-$(docker network inspect iron_dome_net -f '{{.Id}}' | cut -c1-12)
 
-# 3. From the repository root: compiles locally and pushes the compiled
-#    code to each of the four containers, then starts the coordinator
-#    (with graphics) on your host machine.
-cd distributed-iron-dome-erlang
+# 4. Back on your host machine, from the repository root: compiles locally
+#    and pushes the compiled code to each of the four containers, then
+#    starts the coordinator (with graphics) on your host machine — all
+#    four workers in one paste:
 ./deploy.escript 30.30.30.1 \
     erl_host1@30.30.30.11 erl_host2@30.30.30.12 \
     erl_host3@30.30.30.13 erl_host4@30.30.30.14
 ```
 
-Replace `30.30.30.1` in step 3 with whatever address step 2 actually reports
+Replace `30.30.30.1` in step 4 with whatever address step 3 actually reports
 if it differs. When deployment finishes you'll see `Deployment complete.`
 and the graphics window should open, showing four sectors each owned by one
 container.
@@ -172,15 +237,17 @@ container.
 To exercise the recovery logic by simulating a worker failure:
 
 ```bash
-docker compose stop erl_host2      # cluster_coordinator detects this within
-                                    # roughly one heartbeat cycle and
-                                    # redistributes sector_2 to a live worker
-docker compose start erl_host2     # the coordinator notices the node is
-                                    # back, clears any stale state on it,
-                                    # and gives it sectors again
+docker compose -f Docker/docker-compose.yml stop erl_host2
+    # cluster_coordinator detects this within roughly one heartbeat cycle
+    # and redistributes sector_2 to a live worker
+docker compose -f Docker/docker-compose.yml start erl_host2
+    # only the container's SSH server comes back automatically — SSH back
+    # in and re-run the erl_host2 command from step 2 above; only once
+    # that node is reachable again does the coordinator notice, clear any
+    # stale state on it, and give it sectors again
 ```
 
-Tear everything down with `docker compose down`.
+Tear everything down with `docker compose -f Docker/docker-compose.yml down`.
 
 ## 6. Real multi-machine deployment (e.g. 5 physical/virtual machines)
 
@@ -191,8 +258,12 @@ load-balanced across whatever is online, with `sector_N` preferring `hostN`
 when it's available.
 
 **Step 1 — on every worker machine.** No project checkout needed anywhere
-here. Just start a bare Erlang node and leave the terminal open — it now
-waits for the coordinator to push compiled code to it:
+here. Open a terminal on that machine — directly if you're at it, or over
+SSH if it's remote (e.g. `ssh <user>@<that machine's IP>`, with whatever
+username/password or key that machine actually uses — there's nothing
+project-specific about it) — then start a bare Erlang node and leave the
+terminal open — it now waits for the coordinator to push compiled code to
+it:
 
 ```bash
 erl -name erl_host1@<this machine's real LAN IP> \
@@ -249,8 +320,9 @@ tells `cluster_coordinator` to stop every worker node first, then stop
 itself, so the whole cluster goes down together. Worker terminals that were
 started manually (real multi-machine case) simply exit on their own; Docker
 Compose containers stop as part of the `iron_dome` application being shut
-down remotely inside them (`docker compose ps` will show them exited —
-`docker compose up -d` starts a fresh run).
+down remotely inside them (`docker compose -f Docker/docker-compose.yml ps`
+will show them exited — `docker compose -f Docker/docker-compose.yml up -d`
+starts a fresh run).
 
 ## 9. Configuration reference
 

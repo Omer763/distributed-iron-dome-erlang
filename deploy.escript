@@ -1,5 +1,6 @@
 #!/usr/bin/env escript
 %%! -setcookie iron_dome_cookie -kernel inet_dist_listen_min 9100 inet_dist_listen_max 9100 prevent_overlapping_partitions false -net_ticktime 60
+-mode(compile).
 
 main([LocalIp | HostNames]) when HostNames =/= [] ->
     Root = filename:dirname(filename:absname(escript:script_name())),
